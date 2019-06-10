@@ -54,6 +54,9 @@ static char wifi_ssid[WIFI_CREDENTIAL_BUFFER_SIZE];
 static char wifi_password[WIFI_CREDENTIAL_BUFFER_SIZE];
 
 bool run_configuration_menu_state_machine();
+bool open_nvs_handle(nvs_handle *handle);
+void configuration_transition_to_state(configuration_state *current_state, configuration_state new_state);
+
 
 esp_err_t get_handler(httpd_req_t *req) {
     long sum = 0;
@@ -157,8 +160,6 @@ void app_main() {
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
-void configuration_transition_to_state(configuration_state *current_state, configuration_state new_state);
-
 bool run_configuration_menu_state_machine() {
     esp_err_t err = ESP_OK;
     configuration_state state = configuration_state_start;
@@ -184,10 +185,7 @@ bool run_configuration_menu_state_machine() {
             configuration_transition_to_state(&state, configuration_state_check_for_nvs_wifi_credentials);
         } else if (state == configuration_state_check_for_nvs_wifi_credentials) {
             nvs_handle my_handle = NULL;
-            printf("Opening Non-Volatile Storage (NVS) handle...\n");
-            err = nvs_open("storage", NVS_READWRITE, &my_handle);
-            if (err != ESP_OK) {
-                printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+            if (!open_nvs_handle(&my_handle)) {
                 configuration_transition_to_state(&state, configuration_state_error);
                 continue;
             }
@@ -285,10 +283,7 @@ bool run_configuration_menu_state_machine() {
             }
         } else if (state == configuration_state_querying_for_wifi_credentials) {
             nvs_handle my_handle = NULL;
-            printf("Opening Non-Volatile Storage (NVS) handle...\n");
-            err = nvs_open("storage", NVS_READWRITE, &my_handle);
-            if (err != ESP_OK) {
-                printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+            if (!open_nvs_handle(&my_handle)) {
                 configuration_transition_to_state(&state, configuration_state_error);
                 continue;
             }
@@ -335,8 +330,17 @@ bool run_configuration_menu_state_machine() {
             printf("Unknown configuration state %d\n", state);
             configuration_transition_to_state(&state, configuration_state_error);
         }
+    }   
+}
+
+bool open_nvs_handle(nvs_handle *handle) {
+    printf("Opening Non-Volatile Storage (NVS) handle...\n");
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, handle);
+    if (err != ESP_OK) {
+        printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+        return false;
     }
-    
+    return true;
 }
 
 void configuration_transition_to_state(configuration_state *current_state, configuration_state new_state) {
