@@ -26,6 +26,9 @@ typedef enum configuration_state {
     configuration_state_starting_config_menu,
     configuration_state_running_config_menu,
     configuration_state_querying_for_wifi_credentials,
+    configuration_state_running_calibration_menu,
+    configuration_state_querying_for_calibration_y_intercept,
+    configuration_state_querying_for_calibration_slope,
     configuration_state_success
 } configuration_state;
 
@@ -42,6 +45,9 @@ char *configuration_state_label_for_value(configuration_state state) {
         ENUM_TO_STRING_CASE(configuration_state_starting_config_menu);
         ENUM_TO_STRING_CASE(configuration_state_running_config_menu);
         ENUM_TO_STRING_CASE(configuration_state_querying_for_wifi_credentials);
+        ENUM_TO_STRING_CASE(configuration_state_running_calibration_menu);
+        ENUM_TO_STRING_CASE(configuration_state_querying_for_calibration_y_intercept);
+        ENUM_TO_STRING_CASE(configuration_state_querying_for_calibration_slope);
         ENUM_TO_STRING_CASE(configuration_state_success);
     }
     return NULL;
@@ -50,25 +56,41 @@ char *configuration_state_label_for_value(configuration_state state) {
 #define WIFI_NVS_KEY_SSID "wifi_ssid"
 #define WIFI_NVS_KEY_PASSWORD "wifi_password"
 #define WIFI_CREDENTIAL_BUFFER_SIZE 80
+#define CONFIGURATION_MENU_TIMEOUT_SECONDS 2
+
 static char wifi_ssid[WIFI_CREDENTIAL_BUFFER_SIZE];
 static char wifi_password[WIFI_CREDENTIAL_BUFFER_SIZE];
+static float adc_calibration_y_intercept = 0.0;
+static float adc_calibration_slope = 25.3;
 
-bool run_configuration_menu_state_machine();
+bool run_configuration_menu_state_machine(void);
 bool open_nvs_handle(nvs_handle *handle);
 void configuration_transition_to_state(configuration_state *current_state, configuration_state new_state);
+float averaged_adc_sample(void);
+float apply_calibration_to_adc_sample(float sample);
+bool query_float_value(char *prompt, float *out_value);
 
-
-esp_err_t get_handler(httpd_req_t *req) {
+float averaged_adc_sample(void) {
     long sum = 0;
-    int count = 10;
+    int count = 20;
     for (int i = 0; i < count; i++) {
-        sum += adc1_get_raw(ADC1_CHANNEL_6);        
+        sum += adc1_get_raw(ADC1_CHANNEL_6);
+        vTaskDelay(15 / portTICK_PERIOD_MS);
     }
-    float voltage = (((float)sum / (float)count) / 4095.0) * 2.78 * 10.0;
+    return ((float)sum / (float)count) / 4095.0;
+}
+
+float apply_calibration_to_adc_sample(float sample) {
+    return adc_calibration_y_intercept + adc_calibration_slope * sample;
+}
+
+esp_err_t http_handler_power_status_get(httpd_req_t *req) {
+    float sample = averaged_adc_sample();
+    float voltage = apply_calibration_to_adc_sample(sample);
     
     httpd_resp_set_type(req, "text/plain");
     char buffer[80];
-    snprintf(buffer, sizeof(buffer), "voltage %.1f\n", voltage);
+    snprintf(buffer, sizeof(buffer), "voltage %.2f\n", voltage);
     httpd_resp_send(req, buffer, strlen(buffer));
     return ESP_OK;
 }
@@ -76,7 +98,7 @@ esp_err_t get_handler(httpd_req_t *req) {
 httpd_uri_t uri_get = {
     .uri      = "/power_status",
     .method   = HTTP_GET,
-    .handler  = get_handler,
+    .handler  = http_handler_power_status_get,
     .user_ctx = NULL
 };
 
@@ -130,15 +152,14 @@ esp_err_t event_handler(void *ctx, system_event_t *event) {
 
 
 void app_main() {
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_6);
 
     if (!run_configuration_menu_state_machine()) {
         printf("Unable to get configuration information, will restart in 10 seconds...\n");
         sleep(10);
         esp_restart();
     }
-        
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_6);
 
     static httpd_handle_t server = NULL;
 
@@ -160,7 +181,7 @@ void app_main() {
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
-bool run_configuration_menu_state_machine() {
+bool run_configuration_menu_state_machine(void) {
     esp_err_t err = ESP_OK;
     configuration_state state = configuration_state_start;
 
@@ -214,9 +235,8 @@ bool run_configuration_menu_state_machine() {
             nvs_close(my_handle);            
         } else if (state == configuration_state_querying_for_config_menu) {
             bool should_enter_configuration_menu = false;
-            int configuration_menu_timeout_seconds = 5;
-            for (int i = 0; i < configuration_menu_timeout_seconds && !should_enter_configuration_menu; i++) {
-                printf("Press any key within the next %d seconds to enter configuration mode\n", configuration_menu_timeout_seconds - i);
+            for (int i = 0; i < CONFIGURATION_MENU_TIMEOUT_SECONDS && !should_enter_configuration_menu; i++) {
+                printf("Press any key within the next %d seconds to enter configuration mode\n", CONFIGURATION_MENU_TIMEOUT_SECONDS - i);
                 uint8_t ch = fgetc(stdin);
                 if (ch != 255) {
                     printf("Key press detected\n");
@@ -260,12 +280,13 @@ bool run_configuration_menu_state_machine() {
             linenoiseSetDumbMode(1);
             configuration_transition_to_state(&state, configuration_state_running_config_menu);
         } else if (state == configuration_state_running_config_menu) {
-            printf("Choose a setting to change:\n");
+            printf("\nChoose a setting to change:\n");
             printf("w - WiFi settings\n");
             printf("i - IP address settings\n");
+            printf("c - ADC voltage measurement calibration\n");
             printf("r - Reboot\n");
-            // printf("c - voltage measurement calibration\n");
             char *line = linenoise("> ");
+            printf("\n");
             if (line == NULL) {
                 continue;
             }
@@ -273,12 +294,16 @@ bool run_configuration_menu_state_machine() {
             linenoiseFree(line);
 
             switch (menu_choice_letter) {
-                case 'r':
-                    configuration_transition_to_state(&state, configuration_state_restarting);
-                    break;
-
                 case 'w':
                     configuration_transition_to_state(&state, configuration_state_querying_for_wifi_credentials);
+                    break;
+
+                case 'c':
+                    configuration_transition_to_state(&state, configuration_state_running_calibration_menu);
+                    break;
+
+                case 'r':
+                    configuration_transition_to_state(&state, configuration_state_restarting);
                     break;
             }
         } else if (state == configuration_state_querying_for_wifi_credentials) {
@@ -290,13 +315,13 @@ bool run_configuration_menu_state_machine() {
 
             bool did_update_wifi_credentials = false;
             char *line = linenoise("WiFi SSID: ");
+            printf("\n");
             if (line) {
-                printf("\n");
                 strlcpy(wifi_ssid, line, WIFI_CREDENTIAL_BUFFER_SIZE);
                 linenoiseFree(line);
                 line = linenoise("WiFi Password: ");
+                printf("\n");
                 if (line) {
-                    printf("\n");
                     strlcpy(wifi_password, line, WIFI_CREDENTIAL_BUFFER_SIZE);
                     linenoiseFree(line);
                     printf("Updating WiFi credentials in NVS\n");
@@ -316,6 +341,42 @@ bool run_configuration_menu_state_machine() {
             }
             configuration_transition_to_state(&state, configuration_state_running_config_menu);
             nvs_close(my_handle);
+        } else if (state == configuration_state_running_calibration_menu) {
+            float raw_sample = averaged_adc_sample();
+            float calibrated_sample = apply_calibration_to_adc_sample(raw_sample);
+            printf("\nRaw ADC value: %.2f, calibrated value: %.2f, y-intercept: %.2f, slope: %.2f\n", raw_sample, calibrated_sample, adc_calibration_y_intercept, adc_calibration_slope);
+            printf("Choose an option:\n");
+            printf("i - change calibration y-intercept\n");
+            printf("s - change calibration slope\n");
+            printf("n - Commit current values to non-volatile storage\n");
+            printf("c - cancel\n");
+            char *line = linenoise("> ");
+            printf("\n");
+            if (line == NULL) {
+                continue;
+            }
+            char menu_choice_letter = line[0];
+            linenoiseFree(line);
+
+            switch (menu_choice_letter) {
+                case 'i':
+                    configuration_transition_to_state(&state, configuration_state_querying_for_calibration_y_intercept);
+                    break;
+
+                case 's':
+                    configuration_transition_to_state(&state, configuration_state_querying_for_calibration_slope);
+                    break;
+
+                case 'c':
+                    configuration_transition_to_state(&state, configuration_state_running_config_menu);
+                    break;
+            }
+        } else if (state == configuration_state_querying_for_calibration_y_intercept) {
+            query_float_value("Y-intercept: ", &adc_calibration_y_intercept);
+            configuration_transition_to_state(&state, configuration_state_running_calibration_menu);
+        } else if (state == configuration_state_querying_for_calibration_slope) {
+            query_float_value("Slope: ", &adc_calibration_slope);
+            configuration_transition_to_state(&state, configuration_state_running_calibration_menu);
         } else if (state == configuration_state_success) {
             printf("Configuration succeeded\n");
             return true;
@@ -331,6 +392,24 @@ bool run_configuration_menu_state_machine() {
             configuration_transition_to_state(&state, configuration_state_error);
         }
     }   
+}
+
+bool query_float_value(char *prompt, float *out_value) {
+    bool did_get_value = false;
+    char *line = linenoise(prompt);
+    printf("\n");
+    if (line) {
+        char *endptr;
+        float value = strtof(line, &endptr);
+        if (endptr != line) {
+            *out_value = value;
+            did_get_value = true;
+        } else {
+            printf("Unable to parse input as floating point: %s\n", line);
+        }
+        linenoiseFree(line);
+    }
+    return did_get_value;
 }
 
 bool open_nvs_handle(nvs_handle *handle) {
