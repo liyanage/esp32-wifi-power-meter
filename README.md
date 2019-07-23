@@ -11,6 +11,9 @@ and queried via WiFi.
 
 ## Usage
 
+The software implements a configuration menu that you can enter during boot. It's used
+to set up WiFi credentials and ADC voltage calibration.
+
 ### WiFi Configuration
 
 ### ADC Voltage Calibration
@@ -42,7 +45,7 @@ Determine calibration y-intercept and slope values:
 * Set input voltage to 5v, hit the return key a few times, note the ADC raw value, e.g. 0.097
 * Set input voltage to 24v, hit the return key a few times, note the raw value, e.g. 0.607
 * Slope = delta_voltage/delta_adc = (24-5)/(0.607-0.097) = 37.2549
-* Y-intercept = voltage - (adc * slope() = 24-(0.607*37.2549) = 1.3863
+* Y-intercept = voltage - adc * slope = 24-0.607*37.2549 = 1.3863
 
 Set those values using the menu options and hit return a few times to check.
 Change the voltage and check again.
