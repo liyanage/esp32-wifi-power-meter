@@ -1,14 +1,19 @@
 # ESP32 WiFi voltage meter
 
-# PCB
+This is a simple voltage meter that can be powered from about 5 to 24v
+and queried via WiFi.
 
-# Software
+<img src="doc/readme-resources/IMG_1262.jpeg" alt="Final PCB photo" width="600px" height="484px">
 
-# Usage
+## PCB
 
-## WiFi Configuration
+## Software
 
-## ADC Voltage Calibration
+## Usage
+
+### WiFi Configuration
+
+### ADC Voltage Calibration
 
 Drop into ADC calibration menu at boot:
 
